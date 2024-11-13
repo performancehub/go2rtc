@@ -6,7 +6,7 @@ class VideoStream extends VideoRTC {
     }
 
     set divError(value) {
-        if (state !== "loading") return;
+        // if (state !== "loading") return;
         window.parent.postMessage(JSON.stringify({ "VIDEO_ERROR": value }), "*");
     }
 
@@ -42,6 +42,57 @@ class VideoStream extends VideoRTC {
 
         const info = this.querySelector('.info');
         this.insertBefore(this.video, info);
+
+        // Add monitoring logic for video playback state
+        this.monitorVideoPlayback();
+    }
+
+    monitorVideoPlayback() {
+        const videoElement = this.video;
+        if (!videoElement) return;
+
+        let hasStartedPlaying = false;
+        let playbackTimeout;
+
+        const videoSrcs = window.go2rtc_streams?.join(',') || 'unknown';
+
+        // Timeout to check if playback hasn't started within 15 seconds
+        const notStartedTimeout = setTimeout(() => {
+            if (!hasStartedPlaying) {
+                window.parent.postMessage(`PLAYBACK_NOT_STARTED:${videoSrcs}`, "*");
+            }
+        }, 15000); // 15 seconds timeout
+
+        // Monitor playback progress to detect if the video hangs
+        let lastTime = videoElement.currentTime;
+
+        const checkIfVideoIsHung = () => {
+            if (hasStartedPlaying) {
+                if (videoElement.currentTime === lastTime && !videoElement.paused && videoElement.readyState >= 2) {
+                    console.warn('The video appears to be hung (no progress in playback).');
+                    window.parent.postMessage(`PLAYBACK_HUNG:${videoSrcs}`, "*");
+                } else {
+                    console.log('The video seems to be playing normally.');
+                    lastTime = videoElement.currentTime; // Update the last known time
+                }
+            }
+        };
+
+        // Listen for when playback starts
+        videoElement.addEventListener('playing', () => {
+            hasStartedPlaying = true;
+            clearTimeout(notStartedTimeout); // Clear the not started timeout if playback begins
+            console.log('Video playback has started.');
+        });
+
+        // Periodically check for playback hangs (adjust interval as needed)
+        playbackTimeout = setInterval(checkIfVideoIsHung, 10000); // 10 seconds interval
+
+        // Clear intervals and timeouts on video end
+        videoElement.addEventListener('ended', () => {
+            clearTimeout(playbackTimeout);
+            clearTimeout(notStartedTimeout);
+        });
     }
 
     onconnect() {
