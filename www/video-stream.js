@@ -1,4 +1,5 @@
 import { VideoRTC } from './video-rtc.js';
+import { FacialTracking } from './video-facial-tracking.js';
 
 class VideoStream extends VideoRTC {
     set divMode(value) {
@@ -45,6 +46,18 @@ class VideoStream extends VideoRTC {
 
         // Add monitoring logic for video playback state
         this.monitorVideoPlayback();
+
+        this.facialTracking = new FacialTracking(this.video);
+
+        await this.facialTracking.loadFaceApi();
+        window.parent.postMessage('FACE_TRACKING_READY', '*');
+
+        window.addEventListener('message', (event) => {
+            const { action } = event.data || {};
+            if (action === 'start_face_tracking') this.facialTracking.startFaceTracking();
+            else if (action === 'stop_face_tracking') this.facialTracking.stopFaceTracking();
+        });
+
     }
 
     monitorVideoPlayback() {
