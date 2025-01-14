@@ -100,6 +100,7 @@ export class FacialTracking {
         })();
 
         this.detectionInterval = null;
+        this.isTracking = false; // New flag to control tracking state
 
         document.body.appendChild(this.canvas);
         this.canvas.style.position = 'absolute';
@@ -140,10 +141,13 @@ export class FacialTracking {
     async startFaceTracking() {
         if (this.detectionInterval) return;
 
+        this.isTracking = true; // Enable tracking
         const displaySize = { width: this.canvas.width, height: this.canvas.height };
         faceapi.matchDimensions(this.canvas, displaySize);
 
         this.detectionInterval = setInterval(async () => {
+            if (!this.isTracking) return;
+
             if (this.videoElement.paused || this.videoElement.ended) {
                 clearInterval(this.detectionInterval);
                 this.detectionInterval = null;
@@ -213,7 +217,8 @@ export class FacialTracking {
         if (this.detectionInterval) {
             clearInterval(this.detectionInterval);
             this.detectionInterval = null;
-            this.canvas.getContext('2d').clearRect(0, 0, this.canvas.width, this.canvas.height);
         }
+        this.isTracking = false; // Disable tracking
+        this.canvas.getContext('2d').clearRect(0, 0, this.canvas.width, this.canvas.height); // Clear the canvas
     }
 }
