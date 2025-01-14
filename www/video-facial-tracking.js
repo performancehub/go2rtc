@@ -168,10 +168,43 @@ export class FacialTracking {
 
                 const { x, y, width, height } = rect;
 
-                ctx.strokeStyle = '#00BFFF';
+                // Dynamic corner length (increases with bounding box size)
+                const cornerLength = Math.max(10, Math.min(50, Math.floor(Math.min(width, height) / 4)));
+
+                ctx.strokeStyle = '#00BFFF'; // Bright light blue color
                 ctx.lineWidth = 3;
 
-                ctx.strokeRect(x, y, width, height);
+                // Top-left corner
+                ctx.beginPath();
+                ctx.moveTo(x, y);
+                ctx.lineTo(x + cornerLength, y);
+                ctx.moveTo(x, y);
+                ctx.lineTo(x, y + cornerLength);
+                ctx.stroke();
+
+                // Top-right corner
+                ctx.beginPath();
+                ctx.moveTo(x + width, y);
+                ctx.lineTo(x + width - cornerLength, y);
+                ctx.moveTo(x + width, y);
+                ctx.lineTo(x + width, y + cornerLength);
+                ctx.stroke();
+
+                // Bottom-left corner
+                ctx.beginPath();
+                ctx.moveTo(x, y + height);
+                ctx.lineTo(x + cornerLength, y + height);
+                ctx.moveTo(x, y + height);
+                ctx.lineTo(x, y + height - cornerLength);
+                ctx.stroke();
+
+                // Bottom-right corner
+                ctx.beginPath();
+                ctx.moveTo(x + width, y + height);
+                ctx.lineTo(x + width - cornerLength, y + height);
+                ctx.moveTo(x + width, y + height);
+                ctx.lineTo(x + width, y + height - cornerLength);
+                ctx.stroke();
             });
         }, 100);
     }
