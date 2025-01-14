@@ -14,7 +14,7 @@ class VideoStream extends VideoRTC {
     /**
      * Custom GUI
      */
-    oninit() {
+    async oninit() {
         console.debug('stream.oninit');
         super.oninit();
 
