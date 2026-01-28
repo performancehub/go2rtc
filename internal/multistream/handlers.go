@@ -202,7 +202,6 @@ func handleOffer(tr *ws.Transport, msg *ws.Message) error {
 	log.Debug().Msg("[multistream] handleOffer: remote offer set successfully")
 
 	// Generate answer FIRST, before binding streams
-	// This ensures we respond quickly, then bind streams asynchronously
 	log.Debug().Msg("[multistream] handleOffer: generating answer (GetAnswer)...")
 	answer, err := conn.GetAnswer()
 	if err != nil {
@@ -211,48 +210,21 @@ func handleOffer(tr *ws.Transport, msg *ws.Message) error {
 	}
 	log.Debug().Int("answer_len", len(answer)).Msg("[multistream] handleOffer: answer generated")
 
-	// Bind each slot to its stream
+	// Get slots for status reporting
 	slots := session.GetSlots()
+
+	// Build initial slot statuses (all pending/buffering)
 	slotStatuses := make([]SlotStatus, 0, len(slots))
-	log.Debug().Int("slot_count", len(slots)).Msg("[multistream] handleOffer: binding slots to streams")
-
 	for _, slot := range slots {
-		log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] handleOffer: looking up stream")
-
-		stream := streams.Get(slot.StreamName)
-		if stream == nil {
-			log.Warn().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] handleOffer: stream not found")
-			slotStatuses = append(slotStatuses, SlotStatus{
-				Slot:   slot.Index,
-				Stream: slot.StreamName,
-				Status: StatusError,
-				Error:  "stream not found",
-			})
-			continue
-		}
-		log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] handleOffer: stream found, binding...")
-
-		// Bind slot to stream (the slot's consumer handles track setup)
-		if err := slot.Bind(stream); err != nil {
-			log.Error().Err(err).Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] handleOffer: failed to bind slot")
-			slotStatuses = append(slotStatuses, SlotStatus{
-				Slot:   slot.Index,
-				Stream: slot.StreamName,
-				Status: StatusError,
-				Error:  err.Error(),
-			})
-			continue
-		}
-
-		log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] handleOffer: slot bound successfully")
 		slotStatuses = append(slotStatuses, SlotStatus{
 			Slot:   slot.Index,
 			Stream: slot.StreamName,
-			Status: StatusActive,
+			Status: StatusBuffering, // Will update to active once bound
 		})
 	}
 
-	log.Debug().Msg("[multistream] handleOffer: sending answer to client")
+	// SEND ANSWER IMMEDIATELY - don't wait for stream binding!
+	log.Debug().Msg("[multistream] handleOffer: sending answer to client IMMEDIATELY")
 	tr.Write(&ws.Message{
 		Type: "multistream/answer",
 		Value: AnswerMessage{
@@ -268,11 +240,56 @@ func handleOffer(tr *ws.Transport, msg *ws.Message) error {
 
 	log.Info().
 		Str("request_id", req.RequestID).
-		Int("active_slots", countActiveSlots(slotStatuses)).
 		Int("total_slots", len(slots)).
-		Msg("[multistream] handleOffer: complete, answer sent")
+		Msg("[multistream] handleOffer: answer sent, now binding streams asynchronously")
+
+	// Bind streams ASYNCHRONOUSLY in the background
+	// This allows the WebRTC connection to establish while streams are connecting
+	go func() {
+		for _, slot := range slots {
+			log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] async: looking up stream")
+
+			stream := streams.Get(slot.StreamName)
+			if stream == nil {
+				log.Warn().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] async: stream not found")
+				sendSlotStatus(tr, slot.Index, slot.StreamName, StatusError, "stream not found")
+				continue
+			}
+
+			log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] async: binding slot...")
+
+			// Bind slot to stream (this can take several seconds due to FFmpeg startup)
+			if err := slot.Bind(stream); err != nil {
+				log.Error().Err(err).Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] async: failed to bind slot")
+				sendSlotStatus(tr, slot.Index, slot.StreamName, StatusError, err.Error())
+				continue
+			}
+
+			log.Info().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] async: slot bound successfully")
+			sendSlotStatus(tr, slot.Index, slot.StreamName, StatusActive, "")
+		}
+
+		log.Info().Int("total_slots", len(slots)).Msg("[multistream] async: all slots binding complete")
+	}()
 
 	return nil
+}
+
+// sendSlotStatus sends a status update for a single slot
+func sendSlotStatus(tr *ws.Transport, slotIndex int, streamName, status, errMsg string) {
+	tr.Write(&ws.Message{
+		Type: "multistream/status",
+		Value: StatusUpdate{
+			Type: "multistream/status",
+			Slot: slotIndex,
+			Status: SlotStatus{
+				Slot:   slotIndex,
+				Stream: streamName,
+				Status: status,
+				Error:  errMsg,
+			},
+		},
+	})
 }
 
 // handleSwitch handles the multistream/switch message

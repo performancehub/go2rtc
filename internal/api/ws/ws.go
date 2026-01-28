@@ -131,6 +131,13 @@ func apiWS(w http.ResponseWriter, r *http.Request) {
 
 		if handler := wsHandlers[msg.Type]; handler != nil {
 			go func() {
+				// Recover from panics to prevent silent handler deaths
+				defer func() {
+					if r := recover(); r != nil {
+						log.Error().Interface("panic", r).Str("type", msg.Type).Msg("[api] ws handler panic")
+						tr.Write(&Message{Type: "error", Value: msg.Type + ": internal error (panic)"})
+					}
+				}()
 				if err = handler(tr, msg); err != nil {
 					tr.Write(&Message{Type: "error", Value: msg.Type + ": " + err.Error()})
 				}
