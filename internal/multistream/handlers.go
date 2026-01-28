@@ -53,15 +53,18 @@ func getSession(tr *ws.Transport) *MultiStreamSession {
 // handleInit handles the multistream/init message
 // This creates the PeerConnection and transceivers for each requested slot
 func handleInit(tr *ws.Transport, msg *ws.Message) error {
+	log.Debug().Msg("[multistream] handleInit: start")
+
 	var req InitRequest
 	if err := parseMessage(msg, &req); err != nil {
+		log.Error().Err(err).Msg("[multistream] handleInit: failed to parse message")
 		return err
 	}
 
-	log.Debug().
+	log.Info().
 		Str("request_id", req.RequestID).
 		Int("slots", len(req.Slots)).
-		Msg("[multistream] init request")
+		Msg("[multistream] handleInit: request parsed")
 
 	if len(req.Slots) > cfg.MaxSlots {
 		return errors.New("too many slots requested")
@@ -154,45 +157,71 @@ func handleInit(tr *ws.Transport, msg *ws.Message) error {
 // handleOffer handles the multistream/offer message
 // This processes the client's SDP offer and binds slots to streams
 func handleOffer(tr *ws.Transport, msg *ws.Message) error {
+	log.Debug().Msg("[multistream] handleOffer: start")
+
 	var req OfferMessage
 	if err := parseMessage(msg, &req); err != nil {
+		log.Error().Err(err).Msg("[multistream] handleOffer: failed to parse message")
 		return err
 	}
 
 	log.Debug().
 		Str("request_id", req.RequestID).
-		Msg("[multistream] offer received")
+		Int("sdp_len", len(req.SDP)).
+		Msg("[multistream] handleOffer: offer parsed")
 
 	session := getSession(tr)
 	if session == nil {
+		log.Error().Msg("[multistream] handleOffer: no active session")
 		return errors.New("no active session")
 	}
+	log.Debug().Msg("[multistream] handleOffer: session found")
 
 	pc := session.GetPeerConnection()
 	if pc == nil {
+		log.Error().Msg("[multistream] handleOffer: session not initialized")
 		return errors.New("session not initialized, call init first")
 	}
+	log.Debug().Msg("[multistream] handleOffer: peer connection found")
 
 	// Create webrtc.Conn wrapper
+	log.Debug().Msg("[multistream] handleOffer: creating webrtc.Conn wrapper")
 	conn := webrtc.NewConn(pc)
 	conn.Mode = core.ModePassiveConsumer
 	conn.Protocol = "ws"
 	conn.UserAgent = tr.Request.UserAgent()
 	session.SetConn(conn)
+	log.Debug().Msg("[multistream] handleOffer: webrtc.Conn wrapper created")
 
 	// Set remote offer
+	log.Debug().Msg("[multistream] handleOffer: setting remote offer (SetOffer)...")
 	if err := conn.SetOffer(req.SDP); err != nil {
-		log.Error().Err(err).Msg("[multistream] failed to set offer")
+		log.Error().Err(err).Msg("[multistream] handleOffer: failed to set offer")
 		return err
 	}
+	log.Debug().Msg("[multistream] handleOffer: remote offer set successfully")
+
+	// Generate answer FIRST, before binding streams
+	// This ensures we respond quickly, then bind streams asynchronously
+	log.Debug().Msg("[multistream] handleOffer: generating answer (GetAnswer)...")
+	answer, err := conn.GetAnswer()
+	if err != nil {
+		log.Error().Err(err).Msg("[multistream] handleOffer: failed to create answer")
+		return err
+	}
+	log.Debug().Int("answer_len", len(answer)).Msg("[multistream] handleOffer: answer generated")
 
 	// Bind each slot to its stream
 	slots := session.GetSlots()
 	slotStatuses := make([]SlotStatus, 0, len(slots))
+	log.Debug().Int("slot_count", len(slots)).Msg("[multistream] handleOffer: binding slots to streams")
 
 	for _, slot := range slots {
+		log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] handleOffer: looking up stream")
+
 		stream := streams.Get(slot.StreamName)
 		if stream == nil {
+			log.Warn().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] handleOffer: stream not found")
 			slotStatuses = append(slotStatuses, SlotStatus{
 				Slot:   slot.Index,
 				Stream: slot.StreamName,
@@ -201,9 +230,11 @@ func handleOffer(tr *ws.Transport, msg *ws.Message) error {
 			})
 			continue
 		}
+		log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] handleOffer: stream found, binding...")
 
 		// Bind slot to stream (the slot's consumer handles track setup)
 		if err := slot.Bind(stream); err != nil {
+			log.Error().Err(err).Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] handleOffer: failed to bind slot")
 			slotStatuses = append(slotStatuses, SlotStatus{
 				Slot:   slot.Index,
 				Stream: slot.StreamName,
@@ -213,6 +244,7 @@ func handleOffer(tr *ws.Transport, msg *ws.Message) error {
 			continue
 		}
 
+		log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] handleOffer: slot bound successfully")
 		slotStatuses = append(slotStatuses, SlotStatus{
 			Slot:   slot.Index,
 			Stream: slot.StreamName,
@@ -220,13 +252,7 @@ func handleOffer(tr *ws.Transport, msg *ws.Message) error {
 		})
 	}
 
-	// Generate and send answer
-	answer, err := conn.GetAnswer()
-	if err != nil {
-		log.Error().Err(err).Msg("[multistream] failed to create answer")
-		return err
-	}
-
+	log.Debug().Msg("[multistream] handleOffer: sending answer to client")
 	tr.Write(&ws.Message{
 		Type: "multistream/answer",
 		Value: AnswerMessage{
@@ -240,10 +266,11 @@ func handleOffer(tr *ws.Transport, msg *ws.Message) error {
 	// Set up ICE candidate handling
 	setupICEHandler(tr, conn)
 
-	log.Debug().
+	log.Info().
 		Str("request_id", req.RequestID).
 		Int("active_slots", countActiveSlots(slotStatuses)).
-		Msg("[multistream] answer sent")
+		Int("total_slots", len(slots)).
+		Msg("[multistream] handleOffer: complete, answer sent")
 
 	return nil
 }

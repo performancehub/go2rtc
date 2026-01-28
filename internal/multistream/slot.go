@@ -100,30 +100,37 @@ func (slot *Slot) InitConsumer() {
 
 // Bind connects this slot to a stream source
 func (slot *Slot) Bind(stream *streams.Stream) error {
+	log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: acquiring lock")
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
+	log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: lock acquired")
 
 	if stream == nil {
 		slot.Status = StatusError
+		log.Error().Int("slot", slot.Index).Msg("[multistream] Bind: stream is nil")
 		return ErrStreamNotFound
 	}
 
 	if slot.Consumer == nil {
 		slot.Status = StatusError
+		log.Error().Int("slot", slot.Index).Msg("[multistream] Bind: consumer not initialized")
 		return errors.New("slot consumer not initialized")
 	}
 
 	// Add the consumer to the stream
+	// NOTE: This can block if the stream needs to start/connect to the source!
+	log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: calling stream.AddConsumer (may block)...")
 	if err := stream.AddConsumer(slot.Consumer); err != nil {
 		slot.Status = StatusError
-		log.Error().Err(err).Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] failed to add consumer")
+		log.Error().Err(err).Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: AddConsumer failed")
 		return err
 	}
+	log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: AddConsumer completed")
 
 	slot.Stream = stream
 	slot.Status = StatusActive
 
-	log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] slot bound to stream")
+	log.Info().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: slot bound to stream successfully")
 	return nil
 }
 
