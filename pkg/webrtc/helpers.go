@@ -310,6 +310,31 @@ func CandidateHostPriority(network string, index int) uint32 {
 	return 0
 }
 
+// SanitizeSDP removes duplicate msid attributes from SDP that cause Chrome to reject
+// the answer with "Duplicate a=msid lines detected". Pion generates both legacy
+// SSRC-level msid (a=ssrc:XXX msid:...) and modern media-level msid (a=msid:...),
+// but Chrome considers this a duplicate. We remove the legacy SSRC msid/mslabel/label.
+func SanitizeSDP(sdp string) string {
+	lines := strings.Split(sdp, "\r\n")
+	var result []string
+
+	for _, line := range lines {
+		// Skip legacy SSRC-level msid, mslabel, and label attributes
+		// These are redundant when media-level a=msid: is present
+		if strings.HasPrefix(line, "a=ssrc:") {
+			// Check if this is a msid, mslabel, or label attribute
+			if strings.Contains(line, " msid:") ||
+				strings.Contains(line, " mslabel:") ||
+				strings.Contains(line, " label:") {
+				continue // Skip this line
+			}
+		}
+		result = append(result, line)
+	}
+
+	return strings.Join(result, "\r\n")
+}
+
 func UnmarshalICEServers(b []byte) ([]webrtc.ICEServer, error) {
 	type ICEServer struct {
 		URLs       any    `json:"urls"`

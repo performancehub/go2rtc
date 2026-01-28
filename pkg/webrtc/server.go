@@ -78,7 +78,8 @@ transeivers:
 		return
 	}
 
-	return c.pc.LocalDescription().SDP, nil
+	// Sanitize SDP to remove duplicate msid attributes that Chrome rejects
+	return SanitizeSDP(c.pc.LocalDescription().SDP), nil
 }
 
 // GetCompleteAnswer - get SDP answer with candidates inside
@@ -118,5 +119,6 @@ func (c *Conn) GetCompleteAnswer(candidates []string, filter func(*webrtc.ICECan
 		return "", err
 	}
 
-	return string(b), nil
+	// Sanitize SDP to remove duplicate msid attributes that Chrome rejects
+	return SanitizeSDP(string(b)), nil
 }

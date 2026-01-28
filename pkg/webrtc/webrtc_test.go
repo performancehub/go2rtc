@@ -1,6 +1,7 @@
 package webrtc
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/pion/webrtc/v3"
@@ -68,4 +69,56 @@ a=fingerprint:sha-256 A2:93:53:50:E4:2F:C5:4E:DF:7C:70:99:5A:A7:39:50:1A:63:E5:B
 
 	_, err = conn.GetAnswer()
 	require.Nil(t, err)
+}
+
+func TestSanitizeSDP(t *testing.T) {
+	// SDP with duplicate msid attributes (both legacy SSRC-level and modern media-level)
+	// Chrome rejects this with "Duplicate a=msid lines detected"
+	input := "v=0\r\n" +
+		"o=- 1234567890 1234567890 IN IP4 127.0.0.1\r\n" +
+		"s=-\r\n" +
+		"t=0 0\r\n" +
+		"m=video 9 UDP/TLS/RTP/SAVPF 97\r\n" +
+		"a=rtpmap:97 H264/90000\r\n" +
+		"a=ssrc:2815449682 cname:go2rtc\r\n" +
+		"a=ssrc:2815449682 msid:go2rtc video\r\n" +
+		"a=ssrc:2815449682 mslabel:go2rtc\r\n" +
+		"a=ssrc:2815449682 label:video\r\n" +
+		"a=msid:go2rtc video\r\n" +
+		"a=sendonly\r\n"
+
+	result := SanitizeSDP(input)
+
+	// Should keep the modern a=msid: line
+	if !strings.Contains(result, "a=msid:go2rtc video") {
+		t.Errorf("Expected modern a=msid: line to be preserved")
+	}
+
+	// Should keep the cname line (not msid/mslabel/label)
+	if !strings.Contains(result, "a=ssrc:2815449682 cname:go2rtc") {
+		t.Errorf("Expected a=ssrc:XXX cname: line to be preserved")
+	}
+
+	// Should remove legacy SSRC-level msid
+	if strings.Contains(result, "a=ssrc:2815449682 msid:") {
+		t.Errorf("Expected legacy a=ssrc:XXX msid: line to be removed")
+	}
+
+	// Should remove legacy SSRC-level mslabel
+	if strings.Contains(result, "a=ssrc:2815449682 mslabel:") {
+		t.Errorf("Expected legacy a=ssrc:XXX mslabel: line to be removed")
+	}
+
+	// Should remove legacy SSRC-level label
+	if strings.Contains(result, "a=ssrc:2815449682 label:") {
+		t.Errorf("Expected legacy a=ssrc:XXX label: line to be removed")
+	}
+
+	// Should keep other lines
+	if !strings.Contains(result, "a=rtpmap:97 H264/90000") {
+		t.Errorf("Expected a=rtpmap: line to be preserved")
+	}
+	if !strings.Contains(result, "a=sendonly") {
+		t.Errorf("Expected a=sendonly line to be preserved")
+	}
 }
