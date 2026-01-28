@@ -411,15 +411,35 @@ export class MultiStreamClient {
   }
 
   private handleMessage(data: string): void {
-    let msg: ServerMessage;
+    let rawMsg: { type: string; value?: any };
     try {
-      msg = JSON.parse(data);
+      rawMsg = JSON.parse(data);
     } catch (e) {
       this.log('Failed to parse message', data);
       return;
     }
 
+    // go2rtc sends messages in format: { type: "...", value: {...} }
+    // Unwrap the value field and merge with type for easier handling
+    const msg: ServerMessage = rawMsg.value 
+      ? { type: rawMsg.type, ...rawMsg.value }
+      : rawMsg as ServerMessage;
+
     this.log('Received message', msg.type);
+
+    // Handle error messages
+    if (msg.type === 'error') {
+      const errorValue = rawMsg.value as string;
+      this.log('Error from server:', errorValue);
+      
+      // Try to match with pending request callbacks
+      for (const [requestId, callback] of this.requestCallbacks.entries()) {
+        callback({ type: 'error', value: errorValue });
+        this.requestCallbacks.delete(requestId);
+        break;
+      }
+      return;
+    }
 
     // Handle request responses
     if ('request_id' in msg && msg.request_id && this.requestCallbacks.has(msg.request_id)) {
@@ -430,18 +450,22 @@ export class MultiStreamClient {
     }
 
     // Handle ICE candidates from server
-    if (msg.type === 'multistream/ice' && 'value' in msg) {
-      const candidate: RTCIceCandidateInit = {
-        candidate: msg.value as string,
-        sdpMid: '0',
-      };
+    if (msg.type === 'multistream/ice') {
+      // ICE candidate is sent as string in value field
+      const candidateStr = typeof rawMsg.value === 'string' ? rawMsg.value : (rawMsg.value as any)?.candidate;
+      if (candidateStr) {
+        const candidate: RTCIceCandidateInit = {
+          candidate: candidateStr,
+          sdpMid: '0',
+        };
 
-      if (this.pc?.remoteDescription) {
-        this.pc.addIceCandidate(candidate).catch(e => {
-          this.log('Failed to add ICE candidate', e);
-        });
-      } else {
-        this.pendingCandidates.push(candidate);
+        if (this.pc?.remoteDescription) {
+          this.pc.addIceCandidate(candidate).catch(e => {
+            this.log('Failed to add ICE candidate', e);
+          });
+        } else {
+          this.pendingCandidates.push(candidate);
+        }
       }
       return;
     }
@@ -456,9 +480,15 @@ export class MultiStreamClient {
     }
   }
 
-  private send(msg: object): void {
+  /**
+   * Send a message in go2rtc WebSocket format: { type: "...", value: {...} }
+   */
+  private send(msg: { type: string; [key: string]: any }): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
+      // go2rtc WebSocket expects: { "type": "...", "value": { ...data... } }
+      const { type, ...value } = msg;
+      const go2rtcMsg = { type, value };
+      this.ws.send(JSON.stringify(go2rtcMsg));
     } else {
       throw new Error('WebSocket not connected');
     }

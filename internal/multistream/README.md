@@ -176,6 +176,19 @@ streams:
 
 ## WebSocket Protocol
 
+### Message Format
+
+**Important:** All messages use the go2rtc WebSocket format:
+
+```json
+{
+  "type": "message_type",
+  "value": { ...message data... }
+}
+```
+
+The `type` field identifies the message type, and all other fields must be wrapped in the `value` object. This is the standard go2rtc WebSocket API format used by all modules.
+
 ### Connection Flow
 
 ```
@@ -233,12 +246,14 @@ Initialize a multistream session with requested slots:
 ```json
 {
   "type": "multistream/init",
-  "request_id": "uuid-123",
-  "slots": [
-    { "slot": 0, "stream": "camera1", "quality": "360p" },
-    { "slot": 1, "stream": "camera2", "quality": "360p" },
-    { "slot": 2, "stream": "camera3", "quality": "360p" }
-  ]
+  "value": {
+    "request_id": "uuid-123",
+    "slots": [
+      { "slot": 0, "stream": "camera1", "quality": "360p" },
+      { "slot": 1, "stream": "camera2", "quality": "360p" },
+      { "slot": 2, "stream": "camera3", "quality": "360p" }
+    ]
+  }
 }
 ```
 
@@ -249,8 +264,10 @@ Send WebRTC SDP offer after receiving `multistream/ready`:
 ```json
 {
   "type": "multistream/offer",
-  "request_id": "uuid-456",
-  "sdp": "v=0\r\no=- 123456789 2 IN IP4 127.0.0.1\r\n..."
+  "value": {
+    "request_id": "uuid-456",
+    "sdp": "v=0\r\no=- 123456789 2 IN IP4 127.0.0.1\r\n..."
+  }
 }
 ```
 
@@ -261,10 +278,12 @@ Switch a slot to a different stream (instant, no reconnection):
 ```json
 {
   "type": "multistream/switch",
-  "request_id": "uuid-789",
-  "slot": 0,
-  "stream": "camera4",
-  "quality": "720p"
+  "value": {
+    "request_id": "uuid-789",
+    "slot": 0,
+    "stream": "camera4",
+    "quality": "720p"
+  }
 }
 ```
 
@@ -275,7 +294,9 @@ Send ICE candidate to server:
 ```json
 {
   "type": "multistream/ice",
-  "candidate": "candidate:1 1 UDP 2013266431 192.168.1.100 50000 typ host"
+  "value": {
+    "candidate": "candidate:1 1 UDP 2013266431 192.168.1.100 50000 typ host"
+  }
 }
 ```
 
@@ -285,7 +306,8 @@ Gracefully close the session:
 
 ```json
 {
-  "type": "multistream/close"
+  "type": "multistream/close",
+  "value": {}
 }
 ```
 
@@ -298,8 +320,10 @@ Session initialized, client should send offer:
 ```json
 {
   "type": "multistream/ready",
-  "request_id": "uuid-123",
-  "slots": 3
+  "value": {
+    "request_id": "uuid-123",
+    "slots": 3
+  }
 }
 ```
 
@@ -310,13 +334,15 @@ WebRTC SDP answer with slot statuses:
 ```json
 {
   "type": "multistream/answer",
-  "request_id": "uuid-456",
-  "sdp": "v=0\r\no=- 987654321 2 IN IP4 0.0.0.0\r\n...",
-  "slots": [
-    { "slot": 0, "stream": "camera1-360p", "status": "active" },
-    { "slot": 1, "stream": "camera2-360p", "status": "active" },
-    { "slot": 2, "stream": "camera3-360p", "status": "error", "error": "stream not found" }
-  ]
+  "value": {
+    "request_id": "uuid-456",
+    "sdp": "v=0\r\no=- 987654321 2 IN IP4 0.0.0.0\r\n...",
+    "slots": [
+      { "slot": 0, "stream": "camera1-360p", "status": "active" },
+      { "slot": 1, "stream": "camera2-360p", "status": "active" },
+      { "slot": 2, "stream": "camera3-360p", "status": "error", "error": "stream not found" }
+    ]
+  }
 }
 ```
 
@@ -327,11 +353,13 @@ Slot status update (after switch or state change):
 ```json
 {
   "type": "multistream/status",
-  "slot": 0,
-  "status": {
+  "value": {
     "slot": 0,
-    "stream": "camera4-720p",
-    "status": "active"
+    "status": {
+      "slot": 0,
+      "stream": "camera4-720p",
+      "status": "active"
+    }
   }
 }
 ```
