@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, user-scalable=yes, initial-scale=1, maximum-scale=1">
     <meta http-equiv="X-UA-Compatible" content="ie=edge">
-    <title>UBX Camera Re-streamer</title>
+    <title>Performance Hub Camera Re-streamer</title>
     <style>
         body {
             margin: 0;
@@ -166,7 +166,7 @@
     const url = new URL('api', location.href);
     fetch(url, {cache: 'no-cache'}).then(r => r.json()).then(data => {
         const info = document.querySelector('.info');
-        info.innerText = `UBX Camera Re-streamer - (Go2rtc: ${data.version})`;
+        info.innerText = `Performance Hub Camera Re-streamer - (Go2rtc: ${data.version})`;
     });
 
     reload();

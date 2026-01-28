@@ -20,6 +20,7 @@ import (
 	"github.com/AlexxIT/go2rtc/internal/ivideon"
 	"github.com/AlexxIT/go2rtc/internal/mjpeg"
 	"github.com/AlexxIT/go2rtc/internal/mp4"
+	"github.com/AlexxIT/go2rtc/internal/multistream"
 	"github.com/AlexxIT/go2rtc/internal/mpegts"
 	"github.com/AlexxIT/go2rtc/internal/nest"
 	"github.com/AlexxIT/go2rtc/internal/ngrok"
@@ -49,8 +50,9 @@ func main() {
 
 	// 2. Main sources and servers
 
-	rtsp.Init()   // rtsp source, RTSP server
-	webrtc.Init() // webrtc source, WebRTC server
+	rtsp.Init()        // rtsp source, RTSP server
+	webrtc.Init()      // webrtc source, WebRTC server
+	multistream.Init() // multistream WebRTC API
 
 	// 3. Main API
 
