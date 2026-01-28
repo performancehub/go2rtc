@@ -25,6 +25,16 @@ func NewTrack(kind string) *Track {
 	}
 }
 
+// NewTrackWithID creates a new track with a custom track ID
+// This is required for multistream where each slot needs a unique msid
+func NewTrackWithID(kind, trackID, streamID string) *Track {
+	return &Track{
+		kind:     kind,
+		id:       trackID,
+		streamID: streamID,
+	}
+}
+
 func (t *Track) Bind(context webrtc.TrackLocalContext) (webrtc.RTPCodecParameters, error) {
 	t.mu.Lock()
 	t.ssrc = uint32(context.SSRC())

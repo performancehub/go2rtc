@@ -3,6 +3,7 @@ package multistream
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/AlexxIT/go2rtc/internal/api/ws"
@@ -106,8 +107,10 @@ func handleInit(tr *ws.Transport, msg *ws.Message) error {
 			continue
 		}
 
-		// Create a local track for this slot
-		localTrack := webrtc.NewTrack("video")
+		// Create a local track for this slot with UNIQUE track ID
+		// Each track must have a unique msid to avoid Chrome "Duplicate a=msid lines" error
+		trackID := fmt.Sprintf("video-slot%d", slotReq.Slot)
+		localTrack := webrtc.NewTrackWithID("video", trackID, "go2rtc")
 
 		// Create sendonly transceiver with the local track
 		transceiver, err := pc.AddTransceiverFromTrack(localTrack,
