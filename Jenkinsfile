@@ -28,6 +28,11 @@ pipeline {
         stage("Prepare Build Environment to Support ARM") {
             steps {
                 script {
+                    // Register QEMU binary formats for cross-platform builds
+                    // This enables ARM emulation on amd64 hosts
+                    echo "Registering QEMU for multi-architecture builds..."
+                    sh "docker run --rm --privileged multiarch/qemu-user-static --reset -p yes"
+
                     // Detect the parent builder name that supports ARM (linux/arm/v7)
                     def builderName = sh(
                         script: """

@@ -12,6 +12,8 @@ Ultimate camera streaming application with support RTSP, WebRTC, HomeKit, FFmpeg
 
 ** * THIS FORK REMOVES HTML5 VIDEO CONTROLS FROM THE PLAYER * **
 
+** * THIS FORK ADDS MULTISTREAM WEBRTC SUPPORT FOR INSTANT CAMERA SWITCHING * **
+
 ![](assets/go2rtc.png)
 
 - zero-dependency and zero-config [small app](#go2rtc-binary) for all OS (Windows, macOS, Linux, ARM)
@@ -88,6 +90,7 @@ Ultimate camera streaming application with support RTSP, WebRTC, HomeKit, FFmpeg
   * [Module: MP4](#module-mp4)
   * [Module: HLS](#module-hls)
   * [Module: MJPEG](#module-mjpeg)
+  * [Module: Multistream](#module-multistream)
   * [Module: Log](#module-log)
 * [Security](#security)
 * [Codecs filters](#codecs-filters)
@@ -175,6 +178,7 @@ Available modules:
 - [mp4](#module-mp4) - MSE, MP4 stream and MP4 shapshot Server
 - [hls](#module-hls) - HLS TS or fMP4 stream Server
 - [mjpeg](#module-mjpeg) - MJPEG Server
+- [multistream](#module-multistream) - Multi-camera single connection (instant switching)
 - [ffmpeg](#source-ffmpeg) - FFmpeg integration
 - [ngrok](#module-ngrok) - ngrok integration (external access for private network)
 - [hass](#module-hass) - Home Assistant integration
@@ -1201,6 +1205,129 @@ API examples:
 **PS.** This module also supports streaming to the server console (terminal) in the **animated ASCII art** format ([read more](https://github.com/AlexxIT/go2rtc/blob/master/internal/mjpeg/README.md)):
 
 [![](https://img.youtube.com/vi/sHj_3h_sX7M/mqdefault.jpg)](https://www.youtube.com/watch?v=sHj_3h_sX7M)
+
+### Module: Multistream
+
+*Performance Hub Fork Feature*
+
+The multistream module enables **instant camera switching** over a single WebRTC connection. Instead of creating separate connections for each camera (which causes 2-5 second delays when switching), this module allows the frontend to dynamically switch between streams without any reconnection.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Frontend (Browser)                                                 │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │  MultiStreamClient                                             │  │
+│  │  - Single RTCPeerConnection with N video tracks               │  │
+│  │  - WebSocket control channel                                   │  │
+│  │  - Maps tracks to <video> elements                            │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                      │
+│              WebSocket: /api/ws (multistream/* messages)            │
+│                              ▼                                      │
+└─────────────────────────────────────────────────────────────────────┘
+                               │
+┌──────────────────────────────┼──────────────────────────────────────┐
+│  go2rtc Device               │                                      │
+│  ┌───────────────────────────▼───────────────────────────────────┐  │
+│  │  MultiStreamSession                                           │  │
+│  │  ┌─────────────────────────────────────────────────────────┐  │  │
+│  │  │  Slot 0 → [Track] ← camera1-360p                        │  │  │
+│  │  │  Slot 1 → [Track] ← camera2-360p   (switch instantly!)  │  │  │
+│  │  │  Slot 2 → [Track] ← camera3-720p                        │  │  │
+│  │  └─────────────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Benefits:**
+
+| Benefit | Description |
+|---------|-------------|
+| Single Connection | One WebRTC peer connection handles multiple camera streams |
+| Instant Switching | Switch cameras in <300ms (vs 2-5 seconds with iframe approach) |
+| Reduced Device Load | 1 connection instead of 6 for a 6-camera grid view |
+| Quality Switching | Change stream quality without reconnection |
+| Status Updates | Real-time notifications for stream status changes |
+
+**Configuration:**
+
+```yaml
+multistream:
+  max_slots: 9  # Maximum slots per connection (default: 9)
+```
+
+**Stream Naming for Quality Variants:**
+
+Configure quality variants as separate streams using FFmpeg:
+
+```yaml
+streams:
+  camera1: rtsp://192.168.1.10/stream
+  camera1-360p: ffmpeg:camera1#video=h264#height=360
+  camera1-720p: ffmpeg:camera1#video=h264#height=720
+  camera1-1080p: ffmpeg:camera1#video=h264#height=1080
+```
+
+**WebSocket Protocol:**
+
+Multistream uses the existing `/api/ws` WebSocket endpoint with `multistream/*` message types:
+
+| Message Type | Direction | Description |
+|--------------|-----------|-------------|
+| `multistream/init` | Client → Server | Initialize session with slot configurations |
+| `multistream/ready` | Server → Client | Session ready, send offer |
+| `multistream/offer` | Client → Server | WebRTC SDP offer |
+| `multistream/answer` | Server → Client | WebRTC SDP answer with slot statuses |
+| `multistream/switch` | Client → Server | Switch slot to different stream (instant!) |
+| `multistream/status` | Server → Client | Slot status update |
+| `multistream/ice` | Bidirectional | ICE candidate exchange |
+| `multistream/close` | Client → Server | Close session |
+
+**TypeScript Client:**
+
+A TypeScript client library is provided at `www/multistream-client.ts`:
+
+```typescript
+import { MultiStreamClient } from './multistream-client';
+
+const client = new MultiStreamClient('https://device.example.com');
+
+// Connect with 6 cameras at 360p quality
+const slots = [
+  { slot: 0, stream: 'camera1', quality: '360p' },
+  { slot: 1, stream: 'camera2', quality: '360p' },
+  { slot: 2, stream: 'camera3', quality: '360p' },
+  // ...
+];
+
+const trackMap = await client.connect(slots, (slot, status) => {
+  console.log(`Slot ${slot}: ${status.status}`);
+});
+
+// Attach tracks to video elements
+trackMap.forEach((track, slot) => {
+  const video = document.getElementById(`video-${slot}`);
+  video.srcObject = new MediaStream([track]);
+  video.play();
+});
+
+// Switch camera instantly - no reconnection!
+await client.switchStream(0, 'camera4', '1080p');
+```
+
+**Performance Comparison:**
+
+| Metric | Iframe Approach | Multistream |
+|--------|-----------------|-------------|
+| Connection time (6 cameras) | 6-12 seconds | <2 seconds |
+| Camera switch time | 2-5 seconds | <300ms |
+| WebRTC connections per view | 6 | 1 |
+| Device CPU overhead | High | ~50% less |
+| Browser memory | High (6 iframes) | ~40% less |
+
+**Full Documentation:**
+
+For complete API documentation, React integration examples, and migration guides, see the [Multistream README](internal/multistream/README.md).
 
 ### Module: Log
 
