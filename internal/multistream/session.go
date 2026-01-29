@@ -2,10 +2,18 @@ package multistream
 
 import (
 	"sync"
+	"time"
 
 	"github.com/AlexxIT/go2rtc/internal/api/ws"
 	"github.com/AlexxIT/go2rtc/pkg/webrtc"
 	pion "github.com/pion/webrtc/v3"
+)
+
+// Connection state monitoring constants
+const (
+	// DisconnectedGracePeriod is how long to wait before closing after disconnect
+	// WebRTC can briefly disconnect due to network glitches - this prevents premature cleanup
+	DisconnectedGracePeriod = 10 * time.Second
 )
 
 // MultiStreamSession represents a single multistream WebRTC session
@@ -19,6 +27,10 @@ type MultiStreamSession struct {
 	mu    sync.RWMutex
 
 	closed bool
+
+	// Connection monitoring
+	disconnectTimer *time.Timer
+	lastState       pion.PeerConnectionState
 }
 
 // NewSession creates a new multistream session for the given WebSocket transport
@@ -109,6 +121,12 @@ func (s *MultiStreamSession) Close() {
 	}
 	s.closed = true
 
+	// Cancel any pending disconnect timer
+	if s.disconnectTimer != nil {
+		s.disconnectTimer.Stop()
+		s.disconnectTimer = nil
+	}
+
 	// Unbind all slots from streams - this stops transcoding for each consumer
 	log.Debug().Int("slots", len(s.slots)).Msg("[multistream] unbinding all slots")
 	for idx, slot := range s.slots {
@@ -138,5 +156,101 @@ func (s *MultiStreamSession) Transport() *ws.Transport {
 func (s *MultiStreamSession) WriteMessage(msg *ws.Message) {
 	if s.tr != nil {
 		s.tr.Write(msg)
+	}
+}
+
+// HandleConnectionStateChange processes WebRTC peer connection state changes
+// and triggers cleanup when the connection is lost.
+//
+// State flow:
+// - "connected" -> cancel any pending disconnect timer
+// - "disconnected" -> start grace period timer (network may recover)
+// - "failed" -> immediate cleanup (connection unrecoverable)
+// - "closed" -> immediate cleanup
+func (s *MultiStreamSession) HandleConnectionStateChange(state pion.PeerConnectionState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Don't process if already closed
+	if s.closed {
+		return
+	}
+
+	// Track state for logging
+	prevState := s.lastState
+	s.lastState = state
+
+	log.Debug().
+		Str("prev_state", prevState.String()).
+		Str("new_state", state.String()).
+		Msg("[multistream] connection state changed")
+
+	switch state {
+	case pion.PeerConnectionStateConnected:
+		// Connection healthy - cancel any pending disconnect timer
+		if s.disconnectTimer != nil {
+			s.disconnectTimer.Stop()
+			s.disconnectTimer = nil
+			log.Info().Msg("[multistream] connection recovered, cancelled disconnect timer")
+		}
+
+	case pion.PeerConnectionStateDisconnected:
+		// Connection temporarily lost - start grace period
+		// This happens during brief network glitches; connection may recover
+		if s.disconnectTimer == nil {
+			log.Warn().
+				Dur("grace_period", DisconnectedGracePeriod).
+				Msg("[multistream] connection disconnected, starting grace period timer")
+
+			s.disconnectTimer = time.AfterFunc(DisconnectedGracePeriod, func() {
+				log.Warn().Msg("[multistream] grace period expired, closing session due to disconnection")
+				s.closeFromMonitor()
+			})
+		}
+
+	case pion.PeerConnectionStateFailed:
+		// Connection failed (ICE failed, unrecoverable) - immediate cleanup
+		log.Warn().Msg("[multistream] connection failed, closing session immediately")
+		if s.disconnectTimer != nil {
+			s.disconnectTimer.Stop()
+			s.disconnectTimer = nil
+		}
+		// Release lock before calling closeFromMonitor (it will acquire its own lock)
+		s.mu.Unlock()
+		s.closeFromMonitor()
+		s.mu.Lock() // Re-acquire for defer
+
+	case pion.PeerConnectionStateClosed:
+		// Connection closed (by us or peer) - cleanup if not already done
+		log.Debug().Msg("[multistream] peer connection closed")
+		if s.disconnectTimer != nil {
+			s.disconnectTimer.Stop()
+			s.disconnectTimer = nil
+		}
+	}
+}
+
+// closeFromMonitor is called when the connection monitor detects the connection is lost
+// It removes the session from the global sessions map and closes it
+func (s *MultiStreamSession) closeFromMonitor() {
+	// Remove from global sessions map
+	sessionsMu.Lock()
+	if _, ok := sessions[s.tr]; ok {
+		delete(sessions, s.tr)
+		log.Debug().Msg("[multistream] session removed from map by connection monitor")
+	}
+	sessionsMu.Unlock()
+
+	// Close the session (stops all transcoding)
+	s.Close()
+
+	// Notify client that session was closed due to connection loss
+	if s.tr != nil {
+		s.tr.Write(&ws.Message{
+			Type: "multistream/disconnected",
+			Value: map[string]any{
+				"reason": "connection_lost",
+			},
+		})
 	}
 }

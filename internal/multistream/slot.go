@@ -26,6 +26,10 @@ type Slot struct {
 	Consumer    *SlotConsumer        // Consumer implementation for this slot
 	Status      string               // Current status
 
+	// bindingCancelled is set to true when Unbind() is called during an active Bind()
+	// This prevents the race condition where Bind() completes after Unbind() was called
+	bindingCancelled bool
+
 	mu sync.Mutex
 }
 
@@ -113,6 +117,8 @@ func (slot *Slot) Bind(stream *streams.Stream) error {
 
 	slot.mu.Lock()
 	consumer := slot.Consumer
+	// Clear the cancellation flag at the start of binding
+	slot.bindingCancelled = false
 	slot.mu.Unlock()
 
 	if consumer == nil {
@@ -138,9 +144,19 @@ func (slot *Slot) Bind(stream *streams.Stream) error {
 
 	// Now acquire lock to update state
 	slot.mu.Lock()
+	defer slot.mu.Unlock()
+
+	// Check if binding was cancelled while we were waiting (timeout/cleanup)
+	// If cancelled, we need to remove the consumer we just added!
+	if slot.bindingCancelled {
+		log.Warn().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: cancelled during AddConsumer, removing orphaned consumer")
+		stream.RemoveConsumer(consumer)
+		slot.Status = StatusInactive
+		return errors.New("binding cancelled")
+	}
+
 	slot.Stream = stream
 	slot.Status = StatusActive
-	slot.mu.Unlock()
 
 	log.Info().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: slot bound to stream successfully")
 	return nil
@@ -151,10 +167,18 @@ func (slot *Slot) Unbind() {
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
 
+	// Set cancellation flag - if Bind() is in progress, it will clean up when it completes
+	// This prevents orphaned consumers when Unbind() is called during a timeout
+	slot.bindingCancelled = true
+
 	if slot.Stream != nil && slot.Consumer != nil {
 		// Remove consumer from stream first
 		slot.Stream.RemoveConsumer(slot.Consumer)
 		log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] slot unbound from stream")
+	} else if slot.Consumer != nil {
+		// Stream is nil but we have a consumer - binding might be in progress
+		// The bindingCancelled flag will ensure cleanup when Bind() completes
+		log.Debug().Int("slot", slot.Index).Msg("[multistream] slot unbind requested, binding in progress will cleanup")
 	}
 
 	// Reset the consumer to close all senders and prepare for reuse
@@ -203,6 +227,9 @@ func (slot *Slot) Switch(newStreamName string) error {
 		consumer.Reset()
 	}
 
+	// Clear the cancellation flag before starting the new binding
+	slot.bindingCancelled = false
+
 	// Set status to buffering while switching
 	slot.Status = StatusBuffering
 	slot.mu.Unlock()
@@ -219,10 +246,19 @@ func (slot *Slot) Switch(newStreamName string) error {
 
 	// Update state after successful bind
 	slot.mu.Lock()
+	defer slot.mu.Unlock()
+
+	// Check if binding was cancelled while we were waiting
+	if slot.bindingCancelled {
+		log.Warn().Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] Switch: cancelled during AddConsumer, removing orphaned consumer")
+		newStream.RemoveConsumer(consumer)
+		slot.Status = StatusInactive
+		return errors.New("switch cancelled")
+	}
+
 	slot.Stream = newStream
 	slot.StreamName = newStreamName
 	slot.Status = StatusActive
-	slot.mu.Unlock()
 
 	log.Info().Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] Switch: successfully switched to new stream")
 	return nil

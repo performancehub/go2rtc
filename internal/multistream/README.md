@@ -19,6 +19,7 @@ The multistream module enables **instant camera switching** over a single WebRTC
   - [Vanilla JavaScript](#vanilla-javascript)
 - [Migration from Iframes](#migration-from-iframes)
 - [Performance Comparison](#performance-comparison)
+- [Automatic Connection Monitoring](#automatic-connection-monitoring)
 - [Error Handling](#error-handling)
 - [Troubleshooting](#troubleshooting)
 - [API Reference](#api-reference)
@@ -433,6 +434,25 @@ ICE candidate from server:
   "value": "candidate:1 1 UDP 2013266431 192.168.1.123 8555 typ host"
 }
 ```
+
+**multistream/disconnected**
+
+Sent when the WebRTC connection is lost and the session is being cleaned up:
+
+```json
+{
+  "type": "multistream/disconnected",
+  "value": {
+    "reason": "connection_lost"
+  }
+}
+```
+
+This message is sent when:
+- The WebRTC connection enters `failed` state (ICE failure, immediate cleanup)
+- The connection was `disconnected` for longer than the grace period (10 seconds)
+
+The client should handle this by initiating a full reconnection if needed.
 
 ### Status Values
 
@@ -883,6 +903,98 @@ function StreamViewer({ device, cameras }) {
 | Device CPU usage | High | ~50% less | **2x better** |
 | Browser memory | High (6 iframes) | ~40% less | **1.7x better** |
 | Network overhead | 6 DTLS handshakes | 1 DTLS handshake | **6x less** |
+
+---
+
+## Automatic Connection Monitoring
+
+The multistream module automatically monitors the WebRTC connection state and cleans up resources when the connection is lost. This prevents FFmpeg/transcoding processes from running indefinitely when a client disconnects unexpectedly (e.g., browser tab closed, network failure).
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  WebRTC Connection State Machine                                        │
+│                                                                         │
+│  ┌──────────┐                                                          │
+│  │   new    │                                                          │
+│  └────┬─────┘                                                          │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌──────────┐      ICE failed      ┌──────────┐                       │
+│  │connecting├─────────────────────►│  failed  │──► Immediate cleanup   │
+│  └────┬─────┘                      └──────────┘                        │
+│       │                                                                 │
+│       │ ICE success                                                     │
+│       ▼                                                                 │
+│  ┌──────────┐    network glitch    ┌─────────────┐                    │
+│  │connected ├─────────────────────►│disconnected │                    │
+│  └────▲─────┘                      └──────┬──────┘                    │
+│       │                                   │                            │
+│       │    recovery                       │ 10s grace period           │
+│       └───────────────────────────────────┤                            │
+│                                           │ expired                    │
+│                                           ▼                            │
+│                                    Session cleanup:                    │
+│                                    - Unbind all slots                  │
+│                                    - Stop transcoding                  │
+│                                    - Release resources                 │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Connection States
+
+| State | Description | Action |
+|-------|-------------|--------|
+| `connected` | Connection healthy | Cancel any pending cleanup timer |
+| `disconnected` | Connection temporarily lost (network glitch) | Start 10-second grace period |
+| `failed` | Connection unrecoverable (ICE failed) | Immediate cleanup |
+| `closed` | Connection explicitly closed | Cleanup if not already done |
+
+### Grace Period
+
+When the connection enters the `disconnected` state, a 10-second grace period starts. This allows time for the connection to recover from brief network glitches without unnecessarily stopping transcoding. If the connection recovers to `connected` within this period, the cleanup timer is cancelled.
+
+### Client Notification
+
+When the connection is lost and cleanup occurs, the server sends a notification to the client (if the WebSocket is still open):
+
+```json
+{
+  "type": "multistream/disconnected",
+  "value": {
+    "reason": "connection_lost"
+  }
+}
+```
+
+### TypeScript Client Handling
+
+```typescript
+interface DisconnectedMessage {
+  type: 'multistream/disconnected';
+  value: {
+    reason: string;
+  };
+}
+
+// Handle disconnection notification
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.type === 'multistream/disconnected') {
+    console.log('Connection lost:', msg.value.reason);
+    // Handle reconnection logic
+    handleReconnect();
+  }
+};
+```
+
+### Benefits
+
+- **Automatic Resource Cleanup**: FFmpeg processes are stopped when clients disconnect
+- **Network Resilience**: Brief network glitches don't cause unnecessary restarts
+- **No Manual Monitoring**: Server handles all connection state tracking
+- **Reduced Server Load**: Orphaned transcoding processes are cleaned up automatically
 
 ---
 

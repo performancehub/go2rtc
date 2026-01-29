@@ -248,8 +248,9 @@ func handleOffer(tr *ws.Transport, msg *ws.Message) error {
 		},
 	})
 
-	// Set up ICE candidate handling
-	setupICEHandler(tr, conn)
+	// Set up ICE candidate handling and connection state monitoring
+	// This enables automatic cleanup when the WebRTC connection is lost
+	setupICEHandler(tr, conn, session)
 
 	log.Info().
 		Str("request_id", req.RequestID).
@@ -654,8 +655,8 @@ func handleResume(tr *ws.Transport, msg *ws.Message) error {
 	return nil
 }
 
-// setupICEHandler sets up ICE candidate handling for the connection
-func setupICEHandler(tr *ws.Transport, conn *webrtc.Conn) {
+// setupICEHandler sets up ICE candidate handling and connection state monitoring
+func setupICEHandler(tr *ws.Transport, conn *webrtc.Conn, session *MultiStreamSession) {
 	conn.Listen(func(msg any) {
 		switch msg := msg.(type) {
 		case *pion.ICECandidate:
@@ -670,7 +671,9 @@ func setupICEHandler(tr *ws.Transport, conn *webrtc.Conn) {
 			})
 
 		case pion.PeerConnectionState:
-			log.Debug().Str("state", msg.String()).Msg("[multistream] peer connection state changed")
+			// Handle connection state changes for idle detection
+			// This triggers cleanup when the WebRTC connection is lost
+			session.HandleConnectionStateChange(msg)
 		}
 	})
 }
