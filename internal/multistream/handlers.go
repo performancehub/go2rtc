@@ -260,8 +260,8 @@ func handleOffer(tr *ws.Transport, msg *ws.Message) error {
 	// Each slot binds in its own goroutine for faster startup (5s vs 16s for 5 slots)
 	go func() {
 		var wg sync.WaitGroup
-		const bindTimeout = 30 * time.Second // Timeout for each slot binding attempt
-		const maxRetries = 2                  // Maximum binding attempts per slot
+		const bindTimeout = 15 * time.Second // Timeout for each slot binding attempt
+		const maxRetries = 3                  // Maximum binding attempts per slot
 		const retryDelay = 2 * time.Second    // Delay between retries
 
 		for _, slot := range slots {
