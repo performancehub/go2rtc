@@ -171,45 +171,60 @@ func (slot *Slot) Unbind() {
 
 // Switch changes the stream source without WebRTC renegotiation
 func (slot *Slot) Switch(newStreamName string) error {
-	slot.mu.Lock()
-	defer slot.mu.Unlock()
+	log.Debug().Int("slot", slot.Index).Str("new_stream", newStreamName).Msg("[multistream] Switch: starting")
 
-	// Get the new stream
+	// Get the new stream (no lock needed for stream lookup)
 	newStream := streams.Get(newStreamName)
 	if newStream == nil {
+		slot.mu.Lock()
 		slot.Status = StatusError
+		slot.mu.Unlock()
+		log.Error().Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] Switch: stream not found")
 		return ErrStreamNotFound
 	}
 
-	// If same stream, nothing to do
+	// Check if same stream (need lock to read current state)
+	slot.mu.Lock()
 	if slot.StreamName == newStreamName && slot.Stream != nil {
+		slot.mu.Unlock()
+		log.Debug().Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] Switch: already on this stream")
 		return nil
 	}
 
 	// Unbind from old stream first
 	if slot.Stream != nil && slot.Consumer != nil {
 		slot.Stream.RemoveConsumer(slot.Consumer)
-		log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] unbound from old stream")
+		log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Switch: unbound from old stream")
 	}
 
 	// Reset the consumer's senders for the new stream
-	slot.Consumer.Reset()
+	consumer := slot.Consumer
+	if consumer != nil {
+		consumer.Reset()
+	}
 
 	// Set status to buffering while switching
 	slot.Status = StatusBuffering
+	slot.mu.Unlock()
 
-	// Bind to new stream
-	if err := newStream.AddConsumer(slot.Consumer); err != nil {
+	// Bind to new stream - DO NOT hold lock during this blocking call!
+	log.Debug().Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] Switch: binding to new stream (may block)...")
+	if err := newStream.AddConsumer(consumer); err != nil {
+		slot.mu.Lock()
 		slot.Status = StatusError
-		log.Error().Err(err).Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] failed to switch stream")
+		slot.mu.Unlock()
+		log.Error().Err(err).Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] Switch: failed to bind to new stream")
 		return err
 	}
 
+	// Update state after successful bind
+	slot.mu.Lock()
 	slot.Stream = newStream
 	slot.StreamName = newStreamName
 	slot.Status = StatusActive
+	slot.mu.Unlock()
 
-	log.Debug().Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] switched to new stream")
+	log.Info().Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] Switch: successfully switched to new stream")
 	return nil
 }
 
