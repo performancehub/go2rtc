@@ -104,24 +104,29 @@ func (s *MultiStreamSession) Close() {
 	defer s.mu.Unlock()
 
 	if s.closed {
+		log.Debug().Msg("[multistream] session already closed, skipping")
 		return
 	}
 	s.closed = true
 
-	// Unbind all slots from streams
-	for _, slot := range s.slots {
+	// Unbind all slots from streams - this stops transcoding for each consumer
+	log.Debug().Int("slots", len(s.slots)).Msg("[multistream] unbinding all slots")
+	for idx, slot := range s.slots {
+		log.Debug().Int("slot", idx).Str("stream", slot.StreamName).Msg("[multistream] unbinding slot")
 		slot.Unbind()
 	}
+	log.Debug().Msg("[multistream] all slots unbound")
 
 	// Close peer connection
 	if s.pc != nil {
+		log.Debug().Msg("[multistream] closing peer connection")
 		_ = s.pc.Close()
 		s.pc = nil
 	}
 
 	s.conn = nil
 
-	log.Debug().Msg("[multistream] session closed")
+	log.Info().Msg("[multistream] session closed and all resources released")
 }
 
 // Transport returns the WebSocket transport for this session

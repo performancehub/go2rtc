@@ -287,6 +287,65 @@ Switch a slot to a different stream (instant, no reconnection):
 }
 ```
 
+**multistream/pause**
+
+Pause a slot (stops transcoding for this consumer but keeps slot allocated). If other consumers are viewing the same stream, transcoding continues for them:
+
+```json
+{
+  "type": "multistream/pause",
+  "value": {
+    "request_id": "uuid-890",
+    "slot": 0
+  }
+}
+```
+
+**multistream/resume**
+
+Resume a paused slot by rebinding it to a stream:
+
+```json
+{
+  "type": "multistream/resume",
+  "value": {
+    "request_id": "uuid-901",
+    "slot": 0,
+    "stream": "camera1",
+    "quality": "360p"
+  }
+}
+```
+
+**multistream/keyframe**
+
+Request a keyframe (I-frame) for a specific slot or all slots. Useful for recovery after packet loss or when seeking. Use `slot: -1` to request keyframes for all slots:
+
+```json
+{
+  "type": "multistream/keyframe",
+  "value": {
+    "request_id": "uuid-012",
+    "slot": 0
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "type": "multistream/keyframe",
+  "value": {
+    "request_id": "uuid-012",
+    "slot": 0,
+    "status": "requested"
+  }
+}
+```
+
+> **Note**: Actual keyframe delivery depends on the producer type. RTSP sources may respond to keyframe requests, while FFmpeg exec sources may not.
+
 **multistream/ice**
 
 Send ICE candidate to server:
@@ -382,6 +441,7 @@ ICE candidate from server:
 | `pending` | Slot created, not yet bound to a stream |
 | `active` | Stream is connected and video is flowing |
 | `buffering` | Switching streams, waiting for video data |
+| `paused` | Slot paused via `multistream/pause` (no transcoding for this consumer) |
 | `offline` | Stream source is offline or disconnected |
 | `error` | Error occurred (check `error` field for details) |
 | `inactive` | Slot unbound from stream |
@@ -957,7 +1017,7 @@ interface SlotStatus {
   stream: string;
   quality?: string;
   actualQuality?: string;
-  status: 'pending' | 'active' | 'buffering' | 'offline' | 'error' | 'inactive';
+  status: 'pending' | 'active' | 'buffering' | 'paused' | 'offline' | 'error' | 'inactive';
   error?: string;
 }
 

@@ -100,35 +100,47 @@ func (slot *Slot) InitConsumer() {
 
 // Bind connects this slot to a stream source
 func (slot *Slot) Bind(stream *streams.Stream) error {
-	log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: acquiring lock")
-	slot.mu.Lock()
-	defer slot.mu.Unlock()
-	log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: lock acquired")
+	// Validate inputs without holding lock during blocking operations
+	log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: starting")
 
 	if stream == nil {
+		slot.mu.Lock()
 		slot.Status = StatusError
+		slot.mu.Unlock()
 		log.Error().Int("slot", slot.Index).Msg("[multistream] Bind: stream is nil")
 		return ErrStreamNotFound
 	}
 
-	if slot.Consumer == nil {
+	slot.mu.Lock()
+	consumer := slot.Consumer
+	slot.mu.Unlock()
+
+	if consumer == nil {
+		slot.mu.Lock()
 		slot.Status = StatusError
+		slot.mu.Unlock()
 		log.Error().Int("slot", slot.Index).Msg("[multistream] Bind: consumer not initialized")
 		return errors.New("slot consumer not initialized")
 	}
 
 	// Add the consumer to the stream
 	// NOTE: This can block if the stream needs to start/connect to the source!
+	// IMPORTANT: Do NOT hold slot.mu during this call to avoid deadlock with Unbind()
 	log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: calling stream.AddConsumer (may block)...")
-	if err := stream.AddConsumer(slot.Consumer); err != nil {
+	if err := stream.AddConsumer(consumer); err != nil {
+		slot.mu.Lock()
 		slot.Status = StatusError
+		slot.mu.Unlock()
 		log.Error().Err(err).Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: AddConsumer failed")
 		return err
 	}
 	log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: AddConsumer completed")
 
+	// Now acquire lock to update state
+	slot.mu.Lock()
 	slot.Stream = stream
 	slot.Status = StatusActive
+	slot.mu.Unlock()
 
 	log.Info().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: slot bound to stream successfully")
 	return nil
@@ -140,8 +152,17 @@ func (slot *Slot) Unbind() {
 	defer slot.mu.Unlock()
 
 	if slot.Stream != nil && slot.Consumer != nil {
+		// Remove consumer from stream first
 		slot.Stream.RemoveConsumer(slot.Consumer)
 		log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] slot unbound from stream")
+	}
+
+	// Reset the consumer to close all senders and prepare for reuse
+	// Using Reset() instead of Stop() so the consumer can be reused for retries
+	// Reset() closes senders AND sets stopped=false so AddTrack will work again
+	if slot.Consumer != nil {
+		slot.Consumer.Reset()
+		log.Debug().Int("slot", slot.Index).Msg("[multistream] slot consumer reset")
 	}
 
 	slot.Stream = nil
@@ -227,12 +248,37 @@ func (c *SlotConsumer) AddTrack(media *core.Media, codec *core.Codec, track *cor
 		return errors.New("slot has no local track")
 	}
 
+	transceiver := c.slot.Transceiver
+	if transceiver == nil {
+		return errors.New("slot has no transceiver")
+	}
+
+	// Get the negotiated payload type from the transceiver's codec parameters
+	// This is what the browser expects to receive, not the source stream's payload type
+	var payloadType uint8 = 96 // Default H264 dynamic payload type
+	if params := transceiver.Sender().GetParameters(); len(params.Codecs) > 0 {
+		payloadType = uint8(params.Codecs[0].PayloadType)
+	}
+
+	log.Debug().
+		Int("slot", c.slot.Index).
+		Uint8("payload_type", payloadType).
+		Str("codec", codec.Name).
+		Msg("[multistream] using negotiated payload type")
+
 	// Create a sender for this track
 	sender := core.NewSender(media, codec)
 
 	// Set up the handler to write RTP packets to the local track
-	payloadType := codec.PayloadType
+	// Add packet counting for debugging
+	var packetCount uint64
 	sender.Handler = func(packet *core.Packet) {
+		packetCount++
+		if packetCount == 1 {
+			log.Debug().Int("slot", c.slot.Index).Msg("[multistream] first RTP packet sent to WebRTC")
+		} else if packetCount%500 == 0 {
+			log.Debug().Int("slot", c.slot.Index).Uint64("packets", packetCount).Msg("[multistream] RTP packet count")
+		}
 		_ = localTrack.WriteRTP(payloadType, packet)
 	}
 
@@ -256,12 +302,18 @@ func (c *SlotConsumer) AddTrack(media *core.Media, codec *core.Codec, track *cor
 	// Bind the sender to the track receiver
 	sender.Bind(track)
 
+	// Start the sender - this is CRITICAL!
+	// The standard webrtc.Conn calls sender.Start() when connection becomes "connected",
+	// but our senders aren't in conn.Senders, so we must start them manually.
+	// Start() launches the goroutine that reads from the buffer and outputs packets.
+	sender.Start()
+
 	c.senders = append(c.senders, sender)
 
 	log.Debug().
 		Int("slot", c.slot.Index).
 		Str("codec", codec.Name).
-		Msg("[multistream] track added to slot")
+		Msg("[multistream] track added to slot and sender started")
 
 	return nil
 }

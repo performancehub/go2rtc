@@ -33,6 +33,9 @@ func Init() {
 	ws.HandleFunc("multistream/init", handleInit)
 	ws.HandleFunc("multistream/offer", handleOffer)
 	ws.HandleFunc("multistream/switch", handleSwitch)
+	ws.HandleFunc("multistream/pause", handlePause)
+	ws.HandleFunc("multistream/resume", handleResume)
+	ws.HandleFunc("multistream/keyframe", handleKeyframe)
 	ws.HandleFunc("multistream/ice", handleICE)
 	ws.HandleFunc("multistream/close", handleClose)
 

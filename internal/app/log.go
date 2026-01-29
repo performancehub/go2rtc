@@ -3,6 +3,7 @@ package app
 import (
 	"io"
 	"os"
+	"sync"
 
 	"github.com/mattn/go-isatty"
 	"github.com/rs/zerolog"
@@ -102,6 +103,7 @@ var modules = map[string]string{
 const chunkSize = 1 << 16
 
 type circularBuffer struct {
+	mu     sync.Mutex
 	chunks [][]byte
 	r, w   int
 }
@@ -114,6 +116,9 @@ func newBuffer(chunks int) *circularBuffer {
 }
 
 func (b *circularBuffer) Write(p []byte) (n int, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	n = len(p)
 
 	// check if chunk has size
@@ -144,6 +149,9 @@ func (b *circularBuffer) Write(p []byte) (n int, err error) {
 }
 
 func (b *circularBuffer) WriteTo(w io.Writer) (n int64, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	for i := b.r; ; {
 		var nn int
 		if nn, err = w.Write(b.chunks[i]); err != nil {
@@ -162,6 +170,9 @@ func (b *circularBuffer) WriteTo(w io.Writer) (n int64, err error) {
 }
 
 func (b *circularBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	b.chunks[0] = b.chunks[0][:0]
 	b.r = 0
 	b.w = 0

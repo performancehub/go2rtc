@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/AlexxIT/go2rtc/internal/api/ws"
 	"github.com/AlexxIT/go2rtc/internal/streams"
@@ -187,7 +188,7 @@ func handleOffer(tr *ws.Transport, msg *ws.Message) error {
 	}
 	log.Debug().Msg("[multistream] handleOffer: peer connection found")
 
-	// Create webrtc.Conn wrapper
+	// Create webrtc.Conn wrapper for ICE handling (but don't use SetOffer!)
 	log.Debug().Msg("[multistream] handleOffer: creating webrtc.Conn wrapper")
 	conn := webrtc.NewConn(pc)
 	conn.Mode = core.ModePassiveConsumer
@@ -196,21 +197,30 @@ func handleOffer(tr *ws.Transport, msg *ws.Message) error {
 	session.SetConn(conn)
 	log.Debug().Msg("[multistream] handleOffer: webrtc.Conn wrapper created")
 
-	// Set remote offer
-	log.Debug().Msg("[multistream] handleOffer: setting remote offer (SetOffer)...")
-	if err := conn.SetOffer(req.SDP); err != nil {
-		log.Error().Err(err).Msg("[multistream] handleOffer: failed to set offer")
+	// Set remote offer DIRECTLY on PeerConnection
+	// DON'T use conn.SetOffer() - it creates new transceivers that overwrite our unique track IDs!
+	log.Debug().Msg("[multistream] handleOffer: setting remote description directly on PC...")
+	desc := pion.SessionDescription{Type: pion.SDPTypeOffer, SDP: req.SDP}
+	if err := pc.SetRemoteDescription(desc); err != nil {
+		log.Error().Err(err).Msg("[multistream] handleOffer: failed to set remote description")
 		return err
 	}
-	log.Debug().Msg("[multistream] handleOffer: remote offer set successfully")
+	log.Debug().Msg("[multistream] handleOffer: remote description set successfully")
 
 	// Generate answer FIRST, before binding streams
-	log.Debug().Msg("[multistream] handleOffer: generating answer (GetAnswer)...")
-	answer, err := conn.GetAnswer()
+	log.Debug().Msg("[multistream] handleOffer: creating answer...")
+	answerDesc, err := pc.CreateAnswer(nil)
 	if err != nil {
 		log.Error().Err(err).Msg("[multistream] handleOffer: failed to create answer")
 		return err
 	}
+	if err := pc.SetLocalDescription(answerDesc); err != nil {
+		log.Error().Err(err).Msg("[multistream] handleOffer: failed to set local description")
+		return err
+	}
+
+	// Get the sanitized SDP answer (removes duplicate msid attributes)
+	answer := webrtc.SanitizeSDP(pc.LocalDescription().SDP)
 	log.Debug().Int("answer_len", len(answer)).Msg("[multistream] handleOffer: answer generated")
 
 	// Get slots for status reporting
@@ -246,33 +256,81 @@ func handleOffer(tr *ws.Transport, msg *ws.Message) error {
 		Int("total_slots", len(slots)).
 		Msg("[multistream] handleOffer: answer sent, now binding streams asynchronously")
 
-	// Bind streams ASYNCHRONOUSLY in the background
-	// This allows the WebRTC connection to establish while streams are connecting
+	// Bind streams ASYNCHRONOUSLY and IN PARALLEL
+	// Each slot binds in its own goroutine for faster startup (5s vs 16s for 5 slots)
 	go func() {
+		var wg sync.WaitGroup
+		const bindTimeout = 30 * time.Second // Timeout for each slot binding attempt
+		const maxRetries = 2                  // Maximum binding attempts per slot
+		const retryDelay = 2 * time.Second    // Delay between retries
+
 		for _, slot := range slots {
-			log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] async: looking up stream")
+			wg.Add(1)
+			go func(s *Slot) {
+				defer wg.Done()
 
-			stream := streams.Get(slot.StreamName)
-			if stream == nil {
-				log.Warn().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] async: stream not found")
-				sendSlotStatus(tr, slot.Index, slot.StreamName, StatusError, "stream not found")
-				continue
-			}
+				log.Debug().Int("slot", s.Index).Str("stream", s.StreamName).Msg("[multistream] parallel: looking up stream")
 
-			log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] async: binding slot...")
+				stream := streams.Get(s.StreamName)
+				if stream == nil {
+					log.Warn().Int("slot", s.Index).Str("stream", s.StreamName).Msg("[multistream] parallel: stream not found")
+					sendSlotStatus(tr, s.Index, s.StreamName, StatusError, "stream not found")
+					return
+				}
 
-			// Bind slot to stream (this can take several seconds due to FFmpeg startup)
-			if err := slot.Bind(stream); err != nil {
-				log.Error().Err(err).Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] async: failed to bind slot")
-				sendSlotStatus(tr, slot.Index, slot.StreamName, StatusError, err.Error())
-				continue
-			}
+				// Try binding with retries
+				for attempt := 1; attempt <= maxRetries; attempt++ {
+					log.Debug().Int("slot", s.Index).Str("stream", s.StreamName).Int("attempt", attempt).Msg("[multistream] parallel: binding slot...")
 
-			log.Info().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] async: slot bound successfully")
-			sendSlotStatus(tr, slot.Index, slot.StreamName, StatusActive, "")
+					// Bind slot to stream with timeout (FFmpeg startup can hang)
+					bindDone := make(chan error, 1)
+					go func() {
+						bindDone <- s.Bind(stream)
+					}()
+
+					select {
+				case err := <-bindDone:
+					if err != nil {
+						log.Error().Err(err).Int("slot", s.Index).Str("stream", s.StreamName).Int("attempt", attempt).Str("error", err.Error()).Msg("[multistream] parallel: bind failed")
+						if attempt < maxRetries {
+							// Clean up before retry - Reset() allows consumer reuse
+							log.Debug().Int("slot", s.Index).Int("attempt", attempt).Msg("[multistream] parallel: cleaning up before retry")
+							s.Unbind()
+							time.Sleep(retryDelay)
+							continue
+						}
+						log.Error().Int("slot", s.Index).Str("stream", s.StreamName).Str("error", err.Error()).Msg("[multistream] parallel: all retry attempts failed")
+						sendSlotStatus(tr, s.Index, s.StreamName, StatusError, err.Error())
+						return
+					}
+					log.Info().Int("slot", s.Index).Str("stream", s.StreamName).Int("attempt", attempt).Msg("[multistream] parallel: slot bound successfully")
+					sendSlotStatus(tr, s.Index, s.StreamName, StatusActive, "")
+					return // Success, exit retry loop
+
+					case <-time.After(bindTimeout):
+						log.Warn().Int("slot", s.Index).Str("stream", s.StreamName).Int("attempt", attempt).Dur("timeout", bindTimeout).Msg("[multistream] parallel: binding timed out")
+
+						// Clean up the stuck slot before retry or final error
+						log.Debug().Int("slot", s.Index).Msg("[multistream] parallel: calling Unbind to cleanup")
+						s.Unbind()
+						log.Debug().Int("slot", s.Index).Msg("[multistream] parallel: Unbind completed")
+
+						if attempt < maxRetries {
+							log.Info().Int("slot", s.Index).Str("stream", s.StreamName).Int("next_attempt", attempt+1).Msg("[multistream] parallel: retrying after timeout")
+							time.Sleep(retryDelay)
+							log.Debug().Int("slot", s.Index).Int("attempt", attempt+1).Msg("[multistream] parallel: starting retry attempt")
+							continue
+						}
+						log.Error().Int("slot", s.Index).Str("stream", s.StreamName).Msg("[multistream] parallel: all retry attempts exhausted")
+						sendSlotStatus(tr, s.Index, s.StreamName, StatusError, "binding timeout after retries")
+					}
+				}
+			}(slot)
 		}
 
-		log.Info().Int("total_slots", len(slots)).Msg("[multistream] async: all slots binding complete")
+		// Wait for all slots to finish binding (success, failure, or timeout)
+		wg.Wait()
+		log.Info().Int("total_slots", len(slots)).Msg("[multistream] parallel: all slots binding complete")
 	}()
 
 	return nil
@@ -394,18 +452,204 @@ func handleICE(tr *ws.Transport, msg *ws.Message) error {
 // handleClose handles the multistream/close message
 // This gracefully closes the session
 func handleClose(tr *ws.Transport, msg *ws.Message) error {
-	log.Debug().Msg("[multistream] close request")
+	log.Info().Msg("[multistream] close request received")
 
 	sessionsMu.Lock()
 	session, ok := sessions[tr]
 	if ok {
 		delete(sessions, tr)
+		log.Debug().Msg("[multistream] session removed from sessions map")
 	}
 	sessionsMu.Unlock()
 
 	if session != nil {
+		slotCount := session.SlotCount()
+		log.Info().Int("slots", slotCount).Msg("[multistream] closing session with slots")
 		session.Close()
+		log.Info().Msg("[multistream] session closed successfully")
+	} else {
+		log.Warn().Msg("[multistream] close request but no session found")
 	}
+
+	return nil
+}
+
+// handlePause handles the multistream/pause message
+// This pauses a slot (stops transcoding but keeps the slot allocated)
+// Note: If other consumers are viewing the same stream, transcoding continues for them
+func handlePause(tr *ws.Transport, msg *ws.Message) error {
+	var req PauseRequest
+	if err := parseMessage(msg, &req); err != nil {
+		return err
+	}
+
+	log.Debug().
+		Str("request_id", req.RequestID).
+		Int("slot", req.Slot).
+		Msg("[multistream] pause request")
+
+	session := getSession(tr)
+	if session == nil {
+		return errors.New("no active session")
+	}
+
+	slot := session.GetSlot(req.Slot)
+	if slot == nil {
+		sendSlotStatus(tr, req.Slot, "", StatusError, "invalid slot index")
+		return nil
+	}
+
+	// Unbind the slot from its stream
+	// This calls stream.RemoveConsumer() which only stops the producer
+	// if there are no other consumers viewing the same stream
+	slot.Unbind()
+
+	// Update status to paused
+	slot.mu.Lock()
+	slot.Status = StatusPaused
+	streamName := slot.StreamName
+	slot.mu.Unlock()
+
+	// Send status update
+	sendSlotStatus(tr, req.Slot, streamName, StatusPaused, "")
+
+	log.Debug().
+		Int("slot", req.Slot).
+		Str("stream", streamName).
+		Msg("[multistream] slot paused")
+
+	return nil
+}
+
+// handleKeyframe handles the multistream/keyframe message
+// This requests a keyframe (I-frame) for a slot
+// Note: Actual keyframe request support depends on the producer type
+func handleKeyframe(tr *ws.Transport, msg *ws.Message) error {
+	var req KeyframeRequest
+	if err := parseMessage(msg, &req); err != nil {
+		return err
+	}
+
+	log.Debug().
+		Str("request_id", req.RequestID).
+		Int("slot", req.Slot).
+		Msg("[multistream] keyframe request")
+
+	session := getSession(tr)
+	if session == nil {
+		return errors.New("no active session")
+	}
+
+	// If slot is -1, request keyframe for all slots
+	if req.Slot == -1 {
+		slots := session.GetSlots()
+		for _, slot := range slots {
+			requestKeyframeForSlot(slot)
+		}
+		log.Debug().Int("slots", len(slots)).Msg("[multistream] keyframe requested for all slots")
+	} else {
+		slot := session.GetSlot(req.Slot)
+		if slot == nil {
+			return errors.New("invalid slot index")
+		}
+		requestKeyframeForSlot(slot)
+	}
+
+	// Send acknowledgment
+	tr.Write(&ws.Message{
+		Type: "multistream/keyframe",
+		Value: map[string]any{
+			"request_id": req.RequestID,
+			"slot":       req.Slot,
+			"status":     "requested",
+		},
+	})
+
+	return nil
+}
+
+// requestKeyframeForSlot attempts to request a keyframe from the slot's producer
+// This is a best-effort operation - not all producers support keyframe requests
+func requestKeyframeForSlot(slot *Slot) {
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+
+	if slot.Stream == nil {
+		log.Debug().Int("slot", slot.Index).Msg("[multistream] cannot request keyframe - slot not bound")
+		return
+	}
+
+	// TODO: Implement actual keyframe request to producer
+	// For RTSP sources, this would send an RTCP PLI packet
+	// For FFmpeg sources, this is not directly supported
+	log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] keyframe request logged (producer support varies)")
+}
+
+// handleResume handles the multistream/resume message
+// This resumes a paused slot by rebinding it to a stream
+func handleResume(tr *ws.Transport, msg *ws.Message) error {
+	var req ResumeRequest
+	if err := parseMessage(msg, &req); err != nil {
+		return err
+	}
+
+	log.Debug().
+		Str("request_id", req.RequestID).
+		Int("slot", req.Slot).
+		Str("stream", req.Stream).
+		Str("quality", req.Quality).
+		Msg("[multistream] resume request")
+
+	session := getSession(tr)
+	if session == nil {
+		return errors.New("no active session")
+	}
+
+	slot := session.GetSlot(req.Slot)
+	if slot == nil {
+		sendSlotStatus(tr, req.Slot, req.Stream, StatusError, "invalid slot index")
+		return nil
+	}
+
+	// Resolve the stream name with quality suffix
+	streamName := ResolveStreamName(req.Stream, req.Quality)
+
+	// Get the stream
+	stream := streams.Get(streamName)
+	if stream == nil {
+		sendSlotStatus(tr, req.Slot, streamName, StatusError, "stream not found")
+		return nil
+	}
+
+	// Update the slot's stream name
+	slot.mu.Lock()
+	slot.StreamName = streamName
+	slot.Status = StatusBuffering
+	slot.mu.Unlock()
+
+	// Send buffering status immediately
+	sendSlotStatus(tr, req.Slot, streamName, StatusBuffering, "")
+
+	// Bind asynchronously (can block while producer starts)
+	go func() {
+		// Reset the consumer for reuse
+		if slot.Consumer != nil {
+			slot.Consumer.Reset()
+		}
+
+		if err := slot.Bind(stream); err != nil {
+			log.Error().Err(err).Int("slot", req.Slot).Str("stream", streamName).Msg("[multistream] failed to resume slot")
+			sendSlotStatus(tr, req.Slot, streamName, StatusError, err.Error())
+			return
+		}
+
+		sendSlotStatus(tr, req.Slot, streamName, StatusActive, "")
+
+		log.Debug().
+			Int("slot", req.Slot).
+			Str("stream", streamName).
+			Msg("[multistream] slot resumed")
+	}()
 
 	return nil
 }

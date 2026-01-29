@@ -38,6 +38,29 @@ type ICEMessage struct {
 	Candidate string `json:"candidate"` // ICE candidate string
 }
 
+// PauseRequest is sent to pause a slot (stop transcoding but keep slot allocated)
+type PauseRequest struct {
+	Type      string `json:"type"`       // "multistream/pause"
+	RequestID string `json:"request_id"` // Unique request identifier
+	Slot      int    `json:"slot"`       // Slot index to pause
+}
+
+// ResumeRequest is sent to resume a paused slot
+type ResumeRequest struct {
+	Type      string `json:"type"`              // "multistream/resume"
+	RequestID string `json:"request_id"`        // Unique request identifier
+	Slot      int    `json:"slot"`              // Slot index to resume
+	Stream    string `json:"stream"`            // Stream name/ID
+	Quality   string `json:"quality,omitempty"` // Optional quality suffix
+}
+
+// KeyframeRequest is sent to request a keyframe (I-frame) for a slot
+type KeyframeRequest struct {
+	Type      string `json:"type"`       // "multistream/keyframe"
+	RequestID string `json:"request_id"` // Unique request identifier
+	Slot      int    `json:"slot"`       // Slot index to request keyframe for (-1 for all slots)
+}
+
 // Server -> Client messages
 
 // ReadyMessage is sent when the session is initialized and ready for offer
@@ -87,4 +110,5 @@ const (
 	StatusOffline   = "offline"
 	StatusError     = "error"
 	StatusInactive  = "inactive"
+	StatusPaused    = "paused"
 )
