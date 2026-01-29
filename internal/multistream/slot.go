@@ -119,10 +119,14 @@ func (slot *Slot) Bind(stream *streams.Stream) error {
 	consumer := slot.Consumer
 	// Clear the cancellation flag at the start of binding
 	slot.bindingCancelled = false
+	// Store the stream reference BEFORE AddConsumer so Unbind can clean up
+	// even if AddConsumer is still blocked
+	slot.Stream = stream
 	slot.mu.Unlock()
 
 	if consumer == nil {
 		slot.mu.Lock()
+		slot.Stream = nil
 		slot.Status = StatusError
 		slot.mu.Unlock()
 		log.Error().Int("slot", slot.Index).Msg("[multistream] Bind: consumer not initialized")
@@ -135,6 +139,7 @@ func (slot *Slot) Bind(stream *streams.Stream) error {
 	log.Debug().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: calling stream.AddConsumer (may block)...")
 	if err := stream.AddConsumer(consumer); err != nil {
 		slot.mu.Lock()
+		slot.Stream = nil
 		slot.Status = StatusError
 		slot.mu.Unlock()
 		log.Error().Err(err).Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: AddConsumer failed")
@@ -151,11 +156,11 @@ func (slot *Slot) Bind(stream *streams.Stream) error {
 	if slot.bindingCancelled {
 		log.Warn().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: cancelled during AddConsumer, removing orphaned consumer")
 		stream.RemoveConsumer(consumer)
+		slot.Stream = nil
 		slot.Status = StatusInactive
 		return errors.New("binding cancelled")
 	}
 
-	slot.Stream = stream
 	slot.Status = StatusActive
 
 	log.Info().Int("slot", slot.Index).Str("stream", slot.StreamName).Msg("[multistream] Bind: slot bound to stream successfully")
@@ -230,6 +235,11 @@ func (slot *Slot) Switch(newStreamName string) error {
 	// Clear the cancellation flag before starting the new binding
 	slot.bindingCancelled = false
 
+	// Store the new stream reference BEFORE AddConsumer so Unbind can clean up
+	// even if AddConsumer is still blocked
+	slot.Stream = newStream
+	slot.StreamName = newStreamName
+
 	// Set status to buffering while switching
 	slot.Status = StatusBuffering
 	slot.mu.Unlock()
@@ -238,6 +248,7 @@ func (slot *Slot) Switch(newStreamName string) error {
 	log.Debug().Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] Switch: binding to new stream (may block)...")
 	if err := newStream.AddConsumer(consumer); err != nil {
 		slot.mu.Lock()
+		slot.Stream = nil
 		slot.Status = StatusError
 		slot.mu.Unlock()
 		log.Error().Err(err).Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] Switch: failed to bind to new stream")
@@ -252,12 +263,11 @@ func (slot *Slot) Switch(newStreamName string) error {
 	if slot.bindingCancelled {
 		log.Warn().Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] Switch: cancelled during AddConsumer, removing orphaned consumer")
 		newStream.RemoveConsumer(consumer)
+		slot.Stream = nil
 		slot.Status = StatusInactive
 		return errors.New("switch cancelled")
 	}
 
-	slot.Stream = newStream
-	slot.StreamName = newStreamName
 	slot.Status = StatusActive
 
 	log.Info().Int("slot", slot.Index).Str("stream", newStreamName).Msg("[multistream] Switch: successfully switched to new stream")

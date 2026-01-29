@@ -115,8 +115,59 @@ func (s *MultiStreamSession) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// ALWAYS unbind all slots first, even if session appears closed
+	// This handles edge cases where closed flag is set but unbind didn't complete
+	// Unbind is idempotent (checks if Stream is nil), so safe to call multiple times
+	if len(s.slots) > 0 {
+		log.Debug().Int("slots", len(s.slots)).Msg("[multistream] unbinding all slots in parallel")
+
+		// Unbind ALL slots in parallel with a timeout
+		// This prevents one stuck FFmpeg from blocking cleanup of other slots
+		var wg sync.WaitGroup
+		unbindTimeout := 5 * time.Second
+
+		for idx, slot := range s.slots {
+			wg.Add(1)
+			go func(slotIdx int, sl *Slot) {
+				defer wg.Done()
+
+				log.Debug().Int("slot", slotIdx).Str("stream", sl.StreamName).Msg("[multistream] unbinding slot")
+
+				// Run unbind with timeout to prevent blocking on stuck FFmpeg
+				done := make(chan struct{})
+				go func() {
+					sl.Unbind()
+					close(done)
+				}()
+
+				select {
+				case <-done:
+					log.Debug().Int("slot", slotIdx).Msg("[multistream] slot unbind completed")
+				case <-time.After(unbindTimeout):
+					log.Warn().Int("slot", slotIdx).Dur("timeout", unbindTimeout).Msg("[multistream] slot unbind timed out, forcing cleanup")
+					// Force cleanup even if Unbind is stuck
+					sl.mu.Lock()
+					sl.bindingCancelled = true
+					sl.Stream = nil
+					sl.Status = StatusInactive
+					if sl.Consumer != nil {
+						sl.Consumer.Stop()
+					}
+					sl.mu.Unlock()
+				}
+			}(idx, slot)
+		}
+
+		// Wait for all unbinds to complete (with their individual timeouts)
+		wg.Wait()
+		log.Debug().Msg("[multistream] all slots unbound")
+
+		// Clear slots map to prevent double-unbind on subsequent Close() calls
+		s.slots = make(map[int]*Slot)
+	}
+
 	if s.closed {
-		log.Debug().Msg("[multistream] session already closed, skipping")
+		log.Debug().Msg("[multistream] session already closed, skipping remaining cleanup")
 		return
 	}
 	s.closed = true
@@ -126,14 +177,6 @@ func (s *MultiStreamSession) Close() {
 		s.disconnectTimer.Stop()
 		s.disconnectTimer = nil
 	}
-
-	// Unbind all slots from streams - this stops transcoding for each consumer
-	log.Debug().Int("slots", len(s.slots)).Msg("[multistream] unbinding all slots")
-	for idx, slot := range s.slots {
-		log.Debug().Int("slot", idx).Str("stream", slot.StreamName).Msg("[multistream] unbinding slot")
-		slot.Unbind()
-	}
-	log.Debug().Msg("[multistream] all slots unbound")
 
 	// Close peer connection
 	if s.pc != nil {
